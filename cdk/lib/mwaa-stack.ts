@@ -116,7 +116,7 @@ export class MwaaStack extends cdk.Stack {
     // MWAA 환경 생성
     this.mwaaEnvironment = new mwaa.CfnEnvironment(this, 'MwaaEnvironment', {
       name: 'neologism-extraction-env',
-      airflowVersion: '2.7.2',
+      airflowVersion: '3.0.0',
       sourceBucketArn: this.mwaaBucket.bucketArn,
       dagS3Path: 'dags/',
       // requirementsS3Path: 'requirements.txt', // 필요시 활성화

@@ -90,7 +90,7 @@ export class GlueStack extends cdk.Stack {
       role: glueRole.roleArn,
       command: {
         name: 'glueetl',
-        pythonVersion: '3',
+        pythonVersion: '3.11',
         scriptLocation: `s3://${this.scriptBucket.bucketName}/scripts/neologism_extraction_job.py`,
       },
       defaultArguments: {
@@ -110,7 +110,7 @@ export class GlueStack extends cdk.Stack {
         // Python 패키지 (필요시 추가)
         '--additional-python-modules': 'soynlp==0.0.493,konlpy==0.6.0',
       },
-      glueVersion: '4.0',
+      glueVersion: '5.0',
       numberOfWorkers: 2,
       workerType: 'G.1X', // 1 DPU
       timeout: 120, // 2시간
