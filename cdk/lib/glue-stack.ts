@@ -90,7 +90,7 @@ export class GlueStack extends cdk.Stack {
       role: glueRole.roleArn,
       command: {
         name: 'glueetl',
-        pythonVersion: '3.11',
+        // pythonVersion은 Glue 5.0에서 자동으로 3.11 사용 (명시 불필요)
         scriptLocation: `s3://${this.scriptBucket.bucketName}/scripts/neologism_extraction_job.py`,
       },
       defaultArguments: {
