@@ -58,11 +58,15 @@ claude-ner-engineering/
 ├── airflow/
 │   └── dags/
 │       └── neologism_extraction_dag.py  # Airflow DAG
-├── cdk/
-│   ├── app.py                    # CDK 앱
-│   └── stacks/
-│       ├── glue_stack.py         # Glue 인프라
-│       └── mwaa_stack.py         # MWAA 인프라
+├── cdk/                          # CDK TypeScript
+│   ├── bin/
+│   │   └── cdk.ts                # CDK 앱 진입점
+│   ├── lib/
+│   │   ├── glue-stack.ts         # Glue 인프라
+│   │   └── mwaa-stack.ts         # MWAA 인프라
+│   ├── package.json              # Node.js 의존성
+│   ├── tsconfig.json             # TypeScript 설정
+│   └── cdk.json                  # CDK 설정
 ├── requirements.txt
 └── README.md
 ```
@@ -96,21 +100,26 @@ jupyter notebook notebooks/neologism_extraction_test.ipynb
 - 코퍼스 생성
 - 결과 시각화
 
-### 3. AWS 인프라 배포
+### 3. AWS 인프라 배포 (CDK TypeScript)
 
 ```bash
 cd cdk
 
-# CDK 의존성 설치
-pip install -r requirements.txt
+# Node.js 의존성 설치
+npm install
+
+# TypeScript 빌드
+npm run build
 
 # AWS 계정 부트스트랩 (최초 1회)
 cdk bootstrap
 
 # 스택 배포
+npm run deploy
+# 또는
 cdk deploy --all
 
-# 또는 개별 배포
+# 개별 배포
 cdk deploy NeologismGlueStack
 cdk deploy NeologismMwaaStack
 ```

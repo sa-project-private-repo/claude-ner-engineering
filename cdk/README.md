@@ -1,8 +1,8 @@
-# CDK 인프라 배포 가이드
+# CDK 인프라 배포 가이드 (TypeScript)
 
 ## 개요
 
-이 디렉토리는 신조어 추출 시스템의 AWS 인프라를 CDK로 정의합니다.
+이 디렉토리는 신조어 추출 시스템의 AWS 인프라를 **CDK TypeScript**로 정의합니다.
 
 ## 스택 구성
 
@@ -35,14 +35,28 @@
 # AWS CLI 설정
 aws configure
 
+# Node.js 설치 확인 (v18 이상 권장)
+node --version
+
 # CDK CLI 설치
 npm install -g aws-cdk
 
-# Python 의존성
-pip install -r requirements.txt
+# TypeScript 의존성 설치
+cd cdk
+npm install
 ```
 
 ## 배포
+
+### 0. 빌드 (TypeScript → JavaScript)
+
+```bash
+# TypeScript 컴파일
+npm run build
+
+# 또는 watch 모드 (자동 컴파일)
+npm run watch
+```
 
 ### 1. 부트스트랩 (최초 1회)
 
@@ -57,9 +71,13 @@ cdk bootstrap aws://$AWS_ACCOUNT/$AWS_REGION
 
 ```bash
 # 생성될 리소스 확인
+npm run synth
+# 또는
 cdk synth
 
 # Diff 확인
+npm run diff
+# 또는
 cdk diff
 ```
 
@@ -67,11 +85,22 @@ cdk diff
 
 ```bash
 # 모든 스택 배포
+npm run deploy
+# 또는
 cdk deploy --all
 
 # 개별 배포
 cdk deploy NeologismGlueStack
 cdk deploy NeologismMwaaStack
+```
+
+### 4. 삭제
+
+```bash
+# 모든 스택 삭제
+npm run destroy
+# 또는
+cdk destroy --all
 ```
 
 ### 4. 배포 후 확인

@@ -1,0 +1,35 @@
+# CDK TypeScript
+*.js
+!jest.config.js
+*.d.ts
+node_modules
+
+# CDK asset staging directory
+.cdk.staging
+cdk.out
+
+# Build output
+dist/
+
+# Logs
+*.log
+
+# Environment
+.env
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+
+# Python (기존)
+*.py[cod]
+__pycache__
+*.egg-info
+.Python
+venv/

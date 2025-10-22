@@ -13,7 +13,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
 lib64/
 parts/
 sdist/
@@ -50,9 +49,13 @@ Thumbs.db
 # Data
 corpus/
 *.csv
+!cdk/*.json
+!cdk/**/*.json
 *.json
 *.txt
 !requirements.txt
+!package.json
+!tsconfig.json
 
 # Logs
 *.log
