@@ -244,9 +244,8 @@ with DAG(
             '--GENERATE_DEFINITIONS': 'true',  # 뜻 풀이 생성
             '--USE_LLM': 'false',  # LLM 사용 여부 (비용 고려)
         },
-        region_name=AWS_REGION,
-        iam_role_name='AWSGlueServiceRole-NeologismExtraction',  # CDK에서 생성
-        num_of_dpus=2,
+        # region_name, iam_role_name, num_of_dpus는 Airflow 2.9.2에서 제거됨
+        # AWS connection을 통해 region 설정, Glue Job 자체 설정 사용
         wait_for_completion=False,  # 비동기 실행
     )
 
@@ -255,7 +254,7 @@ with DAG(
         task_id='wait_for_glue_job',
         job_name=GLUE_JOB_NAME,
         run_id="{{ task_instance.xcom_pull(task_ids='run_neologism_extraction_glue_job', key='return_value')['JobRunId'] }}",
-        region_name=AWS_REGION,
+        # region_name은 Airflow 2.9.2에서 제거됨 (AWS connection 사용)
         poke_interval=60,  # 60초마다 체크
         timeout=3600,  # 1시간 타임아웃
     )
