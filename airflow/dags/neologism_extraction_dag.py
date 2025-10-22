@@ -16,7 +16,7 @@ from airflow.operators.python import PythonOperator
 from airflow.providers.amazon.aws.operators.glue import GlueJobOperator
 from airflow.providers.amazon.aws.sensors.glue import GlueJobSensor
 from airflow.providers.amazon.aws.operators.s3 import S3CreateObjectOperator
-from airflow.operators.dummy import DummyOperator
+from airflow.operators.empty import EmptyOperator  # Airflow 3.0+
 from airflow.models import Variable
 import json
 import boto3
@@ -207,7 +207,7 @@ with DAG(
 ) as dag:
 
     # Task 0: 시작
-    start = DummyOperator(
+    start = EmptyOperator(
         task_id='start',
     )
 
@@ -215,18 +215,16 @@ with DAG(
     collect_twitter = PythonOperator(
         task_id='collect_twitter_data',
         python_callable=collect_twitter_data,
-        provide_context=True,
     )
 
     # Task 2: AIHub 데이터 수집
     collect_aihub = PythonOperator(
         task_id='collect_aihub_data',
         python_callable=collect_aihub_data,
-        provide_context=True,
     )
 
     # Task 3: 데이터 수집 완료
-    data_collection_complete = DummyOperator(
+    data_collection_complete = EmptyOperator(
         task_id='data_collection_complete',
     )
 
@@ -266,18 +264,16 @@ with DAG(
     validate = PythonOperator(
         task_id='validate_results',
         python_callable=validate_results,
-        provide_context=True,
     )
 
     # Task 7: 알림 전송
     notify = PythonOperator(
         task_id='send_notification',
         python_callable=send_notification,
-        provide_context=True,
     )
 
     # Task 8: 종료
-    end = DummyOperator(
+    end = EmptyOperator(
         task_id='end',
     )
 

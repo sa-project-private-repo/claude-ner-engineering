@@ -1,29 +1,35 @@
-# Core dependencies
-numpy>=2.3.0
-pandas>=2.3.3
-scikit-learn>=1.7.2
+# Core dependencies (NumPy 2.x compatible)
+numpy>=2.3.0,<3.0.0
+pandas>=2.3.3,<3.0.0
+scikit-learn>=1.7.2,<2.0.0
 
 # NLP libraries for Korean
-konlpy>=0.6.0
+konlpy>=0.6.0,<1.0.0
 soynlp>=0.0.493
-kiwipiepy>=0.16.0
-transformers>=4.20.0
+kiwipiepy>=0.16.0,<1.0.0
+transformers>=4.45.0,<5.0.0  # NumPy 2.0 compatible
 
 # Data collection
-requests>=2.32.0
-beautifulsoup4>=4.12.0
-tweepy>=4.14.0
+requests>=2.32.0,<3.0.0
+beautifulsoup4>=4.12.0,<5.0.0
+tweepy>=4.14.0,<5.0.0
 
 # AWS SDK
-boto3>=1.40.0
-awswrangler>=3.9.0
+boto3>=1.40.0,<2.0.0
+awswrangler>=3.9.0,<4.0.0
 
-# Jupyter
-jupyter>=1.1.0
-notebook>=7.3.0
-ipywidgets>=8.1.0
+# Jupyter (for local development only)
+jupyter>=1.1.0,<2.0.0
+notebook>=7.3.0,<8.0.0
+ipywidgets>=8.1.0,<9.0.0
+matplotlib>=3.9.0,<4.0.0
 
 # Utilities
-tqdm>=4.67.0
-python-dotenv>=1.0.0
-pyyaml>=6.0.2
+tqdm>=4.67.0,<5.0.0
+python-dotenv>=1.0.0,<2.0.0
+pyyaml>=6.0.2,<7.0.0
+
+# Testing
+pytest>=8.3.0,<9.0.0
+pytest-cov>=6.0.0,<7.0.0
+pytest-mock>=3.14.0,<4.0.0
