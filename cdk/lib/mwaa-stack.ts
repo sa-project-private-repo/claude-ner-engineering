@@ -59,7 +59,8 @@ export class MwaaStack extends cdk.Stack {
 
     // S3 버킷: Airflow DAGs, Plugins, Requirements
     this.mwaaBucket = new s3.Bucket(this, 'MwaaBucket', {
-      bucketName: `neologism-mwaa-${this.account}-${this.region}`,
+      // bucketName을 지정하지 않으면 CDK가 고유한 이름을 자동 생성
+      // 명시적 이름이 필요한 경우: bucketName: `neologism-mwaa-${this.account}-${this.region}`,
       versioned: true, // MWAA 요구사항
       encryption: s3.BucketEncryption.S3_MANAGED,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
@@ -116,7 +117,9 @@ export class MwaaStack extends cdk.Stack {
     // MWAA 환경 생성
     this.mwaaEnvironment = new mwaa.CfnEnvironment(this, 'MwaaEnvironment', {
       name: 'neologism-extraction-env',
-      airflowVersion: '3.0.0',
+      // Airflow 2.9.2 사용 (안정적이고 모든 리전에서 지원)
+      // Airflow 3.x를 사용하려면: '3.0.6' (일부 리전에서만 지원)
+      airflowVersion: '2.9.2',
       sourceBucketArn: this.mwaaBucket.bucketArn,
       dagS3Path: 'dags/',
       // requirementsS3Path: 'requirements.txt', // 필요시 활성화
