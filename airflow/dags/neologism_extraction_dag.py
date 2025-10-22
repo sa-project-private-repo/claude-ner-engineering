@@ -196,11 +196,14 @@ S3 결과 위치: s3://{S3_BUCKET}/{S3_OUTPUT_PREFIX}latest/
 with DAG(
     dag_id='neologism_extraction_pipeline',
     default_args=default_args,
-    description='신조어 추출 및 코퍼스 생성 파이프라인',
-    schedule_interval='0 2 * * *',  # 매일 오전 2시 (UTC)
+    description='신조어 추출 및 코퍼스 생성 파이프라인 - 증분 업데이트 지원',
+    # 스케줄링: 매일 오전 2시 KST (UTC+9 기준 전일 17시)
+    # 변경하려면: '0 2 * * *' (매일), '0 2 * * 1' (매주 월요일), '0 2 1 * *' (매월 1일)
+    schedule_interval='0 2 * * *',
     start_date=datetime(2024, 1, 1),
-    catchup=False,
-    tags=['nlp', 'neologism', 'corpus', 'glue'],
+    catchup=False,  # 과거 실행 건너뛰기
+    max_active_runs=1,  # 동시 실행 1개만 허용 (중복 방지)
+    tags=['nlp', 'neologism', 'corpus', 'glue', 'daily'],
 ) as dag:
 
     # Task 0: 시작
@@ -227,7 +230,7 @@ with DAG(
         task_id='data_collection_complete',
     )
 
-    # Task 4: AWS Glue Job 실행 (신조어 추출)
+    # Task 4: AWS Glue Job 실행 (신조어 추출 + 중복 제거 + 뜻 풀이)
     run_glue_job = GlueJobOperator(
         task_id='run_neologism_extraction_glue_job',
         job_name=GLUE_JOB_NAME,
@@ -238,6 +241,10 @@ with DAG(
             '--OUTPUT_PREFIX': S3_OUTPUT_PREFIX,
             '--MIN_COUNT': '3',
             '--MIN_COHESION': '0.03',
+            '--ENABLE_DEDUP': 'true',  # 중복 제거 활성화
+            '--UPDATE_STRATEGY': 'merge',  # merge, replace, new_only
+            '--GENERATE_DEFINITIONS': 'true',  # 뜻 풀이 생성
+            '--USE_LLM': 'false',  # LLM 사용 여부 (비용 고려)
         },
         region_name=AWS_REGION,
         iam_role_name='AWSGlueServiceRole-NeologismExtraction',  # CDK에서 생성
