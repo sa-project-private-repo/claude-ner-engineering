@@ -20,7 +20,8 @@ export class GlueStack extends cdk.Stack {
 
     // S3 버킷: 데이터 저장소
     this.dataBucket = new s3.Bucket(this, 'NeologismDataBucket', {
-      bucketName: `neologism-data-${this.account}-${this.region}`,
+      // bucketName을 지정하지 않으면 CDK가 고유한 이름을 자동 생성
+      // 명시적 이름이 필요한 경우: bucketName: `neologism-data-${this.account}-${this.region}`,
       versioned: true,
       encryption: s3.BucketEncryption.S3_MANAGED,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
@@ -46,7 +47,8 @@ export class GlueStack extends cdk.Stack {
 
     // S3 버킷: Glue 스크립트 저장
     this.scriptBucket = new s3.Bucket(this, 'GlueScriptBucket', {
-      bucketName: `neologism-glue-scripts-${this.account}-${this.region}`,
+      // bucketName을 지정하지 않으면 CDK가 고유한 이름을 자동 생성
+      // 명시적 이름이 필요한 경우: bucketName: `neologism-glue-scripts-${this.account}-${this.region}`,
       encryption: s3.BucketEncryption.S3_MANAGED,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
