@@ -216,28 +216,53 @@ word,score,frequency,cohesion,type,examples
 
 ## 신조어 추출 알고리즘
 
+### ⚡ 핵심: 통계적 비지도 학습 (NLP)
+
+**사용 기술**: soynlp WordExtractor + 형태소 분석 (kiwipiepy)
+
+> ❌ CNN (딥러닝) 아님
+> ❌ NER (개체명 인식) 아님
+> ✅ **통계적 자연어 처리 (NLP)**
+
+📚 **상세 설명**: [ALGORITHM.md](docs/ALGORITHM.md) | [비교 문서](docs/COMPARISON.md)
+
+### 알고리즘 단계
+
 1. **텍스트 전처리**
    - URL, 이메일 제거
    - 반복 문자 정규화 (ㅋㅋㅋㅋ → ㅋㅋ)
    - 해시태그 처리
 
-2. **후보 추출**
-   - soynlp WordExtractor 사용
-   - 응집도(Cohesion) 계산
-   - 분기 엔트로피(Branching Entropy) 계산
+2. **통계적 후보 추출** (soynlp)
+   - **응집도(Cohesion)**: 단어 내부 결합력 측정
+     - 예: "갓생" = "갓" + "생"의 결합 강도
+   - **분기 엔트로피(Branching Entropy)**: 단어 경계 판단
+     - 좌우 문맥의 다양성으로 독립 단어 여부 판단
 
 3. **필터링**
    - 최소 빈도 (기본: 5회)
    - 길이 제한 (2-10글자)
    - 기존 사전과 비교
 
-4. **점수 계산**
+4. **점수 계산** (가중 평균)
    ```
-   score = 0.3 * cohesion +
-           0.3 * right_entropy +
-           0.2 * left_entropy +
-           0.2 * log_frequency
+   score = 0.3 × cohesion +        # 응집도
+           0.3 × right_entropy +   # 우측 엔트로피
+           0.2 × left_entropy +    # 좌측 엔트로피
+           0.2 × log(frequency)    # 빈도 (정규화)
    ```
+
+### 왜 통계적 방법인가?
+
+| 특징 | 통계적 (우리) | 딥러닝 (CNN) |
+|------|--------------|-------------|
+| 레이블 데이터 | 불필요 ✅ | 필수 ❌ |
+| 새 신조어 발견 | 즉시 ✅ | 재학습 필요 ❌ |
+| 처리 속도 | 빠름 ✅ | 느림 ❌ |
+| 설명 가능성 | 높음 ✅ | 낮음 ❌ |
+| 비용 | 저렴 ✅ | 비싸 (GPU) ❌ |
+
+**신조어는 매일 새로 생기므로 통계적 방법이 최적!**
 
 ## 모니터링 및 로그
 
