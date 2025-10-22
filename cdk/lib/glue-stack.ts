@@ -52,6 +52,7 @@ export class GlueStack extends cdk.Stack {
       encryption: s3.BucketEncryption.S3_MANAGED,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true, // 스택 삭제/업데이트 시 자동으로 모든 객체 삭제
     });
 
     // Glue Job 스크립트 업로드
