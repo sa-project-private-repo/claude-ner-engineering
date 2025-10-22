@@ -39,9 +39,22 @@ fi
 source venv/bin/activate
 pip install -q --upgrade pip
 pip install -q -r requirements.txt
-pip install -q -r cdk/requirements.txt
 
-echo -e "${GREEN}✓ 의존성 설치 완료${NC}"
+echo -e "${GREEN}✓ Python 의존성 설치 완료${NC}"
+
+# CDK TypeScript 의존성 설치
+echo -e "\n${YELLOW}CDK TypeScript 의존성 설치 중...${NC}"
+
+if ! command -v npm &> /dev/null; then
+    echo -e "${RED}npm이 설치되지 않았습니다! Node.js를 설치해주세요.${NC}"
+    exit 1
+fi
+
+cd cdk
+npm install
+cd ..
+
+echo -e "${GREEN}✓ CDK 의존성 설치 완료${NC}"
 
 # 3. CDK 부트스트랩 (최초 1회만)
 echo -e "\n${YELLOW}[3/5] CDK 부트스트랩 확인 중...${NC}"
