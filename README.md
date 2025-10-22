@@ -4,7 +4,13 @@
 
 ## 주요 기능
 
-### ✨ v0.2.0 신기능
+### 🚀 v0.3.0 신기능 (검색 엔진 통합)
+- **동의어 자동 생성**: 편집 거리, 형태소 패턴, 공기어 분석으로 유사 신조어 그룹화
+- **OpenSearch/Elasticsearch 즉시 통합**: Solr 동의어, Nori 사용자 사전 자동 생성
+- **검색 품질 향상**: 동의어 검색으로 "갓생" 검색 시 "갓생활"도 함께 검색
+- **재사용 가능한 구조**: 모듈화된 파이프라인으로 다른 프로젝트에도 활용 가능
+
+### ✨ v0.2.0 기능
 - **증분 업데이트**: 기존 사전과 자동 병합, 중복 제거
 - **뜻 풀이 자동 생성**: 신조어 의미 사전 생성 (규칙 기반 + 선택적 LLM)
 - **유연한 스케줄링**: 일일/주간/월간 자동 실행 설정
@@ -47,27 +53,47 @@
 ```
 claude-ner-engineering/
 ├── src/
-│   └── neologism_extractor/      # 핵심 로직
-│       ├── extractor.py          # 신조어 추출기
-│       ├── data_collector.py     # 데이터 수집기
-│       └── corpus_builder.py     # 코퍼스 빌더
+│   └── neologism_extractor/           # 핵심 로직
+│       ├── extractor.py               # 신조어 추출기
+│       ├── data_collector.py          # 데이터 수집기
+│       ├── corpus_builder.py          # 코퍼스 빌더
+│       ├── definition_generator.py    # 뜻 풀이 생성기
+│       ├── synonym_generator.py       # 동의어 생성기 ⭐ NEW
+│       └── search_engine_exporter.py  # 검색 엔진 파일 생성 ⭐ NEW
 ├── notebooks/
 │   └── neologism_extraction_test.ipynb  # 테스트 노트북
+├── examples/
+│   └── search_engine_integration_example.py  # 검색 엔진 통합 예제 ⭐ NEW
 ├── glue_jobs/
-│   └── neologism_extraction_job.py      # Glue ETL 스크립트
+│   └── neologism_extraction_job.py      # Glue ETL 스크립트 (동의어 생성 포함)
 ├── airflow/
-│   └── dags/
-│       └── neologism_extraction_dag.py  # Airflow DAG
-├── cdk/                          # CDK TypeScript
+│   ├── dags/
+│   │   └── neologism_extraction_dag.py  # Airflow DAG (Airflow 3.0)
+│   └── requirements.txt                 # MWAA 전용 의존성
+├── cdk/                                 # CDK TypeScript
 │   ├── bin/
-│   │   └── cdk.ts                # CDK 앱 진입점
+│   │   └── cdk.ts                       # CDK 앱 진입점
 │   ├── lib/
-│   │   ├── glue-stack.ts         # Glue 인프라
-│   │   └── mwaa-stack.ts         # MWAA 인프라
-│   ├── package.json              # Node.js 의존성
-│   ├── tsconfig.json             # TypeScript 설정
-│   └── cdk.json                  # CDK 설정
-├── requirements.txt
+│   │   ├── glue-stack.ts                # Glue 인프라
+│   │   └── mwaa-stack.ts                # MWAA 인프라
+│   ├── package.json                     # Node.js 의존성
+│   ├── tsconfig.json                    # TypeScript 설정
+│   └── cdk.json                         # CDK 설정
+├── tests/                               # 테스트 스위트 ⭐ NEW
+│   ├── test_dag.py                      # DAG 검증
+│   ├── test_extractor.py                # 추출기 테스트
+│   ├── test_corpus_builder.py           # 빌더 테스트
+│   └── README.md                        # 테스트 가이드
+├── docs/                                # 문서
+│   ├── ALGORITHM.md                     # 알고리즘 설명
+│   ├── COMPARISON.md                    # 방법론 비교
+│   ├── SCHEDULING.md                    # 스케줄링 가이드
+│   ├── IMPROVEMENTS.md                  # 개선 제안서
+│   └── SEARCH_ENGINE_INTEGRATION.md     # 검색 엔진 통합 가이드 ⭐ NEW
+├── scripts/
+│   └── setup_local_airflow.sh           # Airflow 로컬 환경 설정 ⭐ NEW
+├── requirements.txt                     # Python 의존성
+├── pytest.ini                           # pytest 설정 ⭐ NEW
 └── README.md
 ```
 
@@ -380,6 +406,51 @@ schedule_interval='0 2 * * *'  # 한국 시간 오전 11시
 - 입력 데이터 확인 (최소 100개 이상 권장)
 - min_count, min_cohesion 파라미터 조정
 - 텍스트 전처리 결과 확인
+
+## 🔍 검색 엔진 통합
+
+### OpenSearch/Elasticsearch에 신조어 사전 적용
+
+파이프라인은 검색 엔진에서 바로 사용할 수 있는 형식으로 파일을 생성합니다:
+
+```bash
+# S3에서 파일 다운로드
+aws s3 cp s3://your-bucket/output/search_engine/latest/ . --recursive
+
+# 생성된 파일 목록
+ls -la
+# synonyms.txt              # Solr 동의어 파일
+# user_dictionary.txt       # 기본 사용자 사전
+# nori_user_dictionary.txt  # Nori Tokenizer용
+# index_settings.json       # 인덱스 설정
+# README.md                 # 사용 가이드
+```
+
+### 빠른 적용
+
+```bash
+# 1. 파일 배치
+cp synonyms.txt /etc/opensearch/analysis/
+cp nori_user_dictionary.txt /etc/opensearch/
+
+# 2. 인덱스 생성
+curl -X PUT "localhost:9200/neologism_search" \
+  -H 'Content-Type: application/json' \
+  -d @index_settings.json
+
+# 3. OpenSearch 재시작
+sudo systemctl restart opensearch
+```
+
+### 검색 예제
+
+```bash
+# "갓생" 검색 → "갓생활"도 함께 검색됨 (동의어)
+curl -X GET "localhost:9200/neologism_search/_search" \
+  -d '{"query": {"match": {"text": "갓생"}}}'
+```
+
+**상세 가이드:** [docs/SEARCH_ENGINE_INTEGRATION.md](docs/SEARCH_ENGINE_INTEGRATION.md)
 
 ## 개발 가이드
 

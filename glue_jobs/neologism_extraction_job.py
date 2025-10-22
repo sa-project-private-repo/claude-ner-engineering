@@ -30,7 +30,9 @@ optional_params = [
     'ENABLE_DEDUP',
     'UPDATE_STRATEGY',
     'GENERATE_DEFINITIONS',
-    'USE_LLM'
+    'USE_LLM',
+    'GENERATE_SYNONYMS',
+    'EXPORT_FOR_SEARCH_ENGINE'
 ]
 
 # 파라미터 파싱 (선택적 파라미터는 기본값 사용)
@@ -43,6 +45,8 @@ except:
     args['UPDATE_STRATEGY'] = 'merge'
     args['GENERATE_DEFINITIONS'] = 'false'
     args['USE_LLM'] = 'false'
+    args['GENERATE_SYNONYMS'] = 'true'
+    args['EXPORT_FOR_SEARCH_ENGINE'] = 'true'
 
 # Spark/Glue 초기화
 sc = SparkContext()
@@ -67,12 +71,16 @@ ENABLE_DEDUP = args.get('ENABLE_DEDUP', 'false').lower() == 'true'
 UPDATE_STRATEGY = args.get('UPDATE_STRATEGY', 'merge')
 GENERATE_DEFINITIONS = args.get('GENERATE_DEFINITIONS', 'false').lower() == 'true'
 USE_LLM = args.get('USE_LLM', 'false').lower() == 'true'
+GENERATE_SYNONYMS = args.get('GENERATE_SYNONYMS', 'true').lower() == 'true'
+EXPORT_FOR_SEARCH_ENGINE = args.get('EXPORT_FOR_SEARCH_ENGINE', 'true').lower() == 'true'
 
 print(f"Job 시작: {args['JOB_NAME']}")
 print(f"Input: s3://{INPUT_BUCKET}/{INPUT_PREFIX}")
 print(f"Output: s3://{OUTPUT_BUCKET}/{OUTPUT_PREFIX}")
 print(f"중복 제거: {ENABLE_DEDUP} (전략: {UPDATE_STRATEGY})")
 print(f"뜻 풀이 생성: {GENERATE_DEFINITIONS} (LLM: {USE_LLM})")
+print(f"동의어 생성: {GENERATE_SYNONYMS}")
+print(f"검색 엔진 export: {EXPORT_FOR_SEARCH_ENGINE}")
 
 
 def download_package_from_s3(bucket, key, local_path='/tmp/neologism_extractor'):
@@ -386,6 +394,335 @@ def save_to_s3(data, bucket, key):
     print(f"저장 완료: s3://{bucket}/{key}")
 
 
+def generate_synonyms_simple(words, texts=None):
+    """
+    간단한 동의어 생성 (편집 거리 기반)
+
+    Args:
+        words: 단어 리스트
+        texts: 원본 텍스트 (공기어 분석용, 선택)
+
+    Returns:
+        {word: [synonyms], ...}
+    """
+    from difflib import SequenceMatcher
+
+    synonym_map = {}
+
+    # 편집 거리 기반 유사 단어 찾기
+    for i, word1 in enumerate(words):
+        if len(word1) < 2:
+            continue
+
+        synonyms = []
+        for word2 in words[i+1:]:
+            if len(word2) < 2:
+                continue
+
+            # 길이 차이가 너무 크면 건너뛰기
+            if abs(len(word1) - len(word2)) > 2:
+                continue
+
+            # 유사도 계산
+            similarity = SequenceMatcher(None, word1, word2).ratio()
+
+            if similarity >= 0.7:  # 70% 이상 유사
+                synonyms.append(word2)
+
+        if synonyms:
+            synonym_map[word1] = synonyms
+
+    print(f"동의어 생성 완료: {len(synonym_map)}개 단어")
+    return synonym_map
+
+
+def generate_synonym_groups(synonym_map):
+    """
+    동의어 그룹 생성 (연결된 모든 동의어를 하나의 그룹으로)
+
+    Args:
+        synonym_map: {word: [synonyms], ...}
+
+    Returns:
+        [{word1, word2, ...}, ...]
+    """
+    # Union-Find 알고리즘
+    parent = {}
+
+    def find(x):
+        if x not in parent:
+            parent[x] = x
+        if parent[x] != x:
+            parent[x] = find(parent[x])
+        return parent[x]
+
+    def union(x, y):
+        px, py = find(x), find(y)
+        if px != py:
+            parent[px] = py
+
+    # 동의어 관계를 union
+    for word, synonyms in synonym_map.items():
+        for syn in synonyms:
+            union(word, syn)
+
+    # 그룹화
+    from collections import defaultdict
+    groups = defaultdict(set)
+    for word in synonym_map.keys():
+        root = find(word)
+        groups[root].add(word)
+
+    # 1개 이상의 단어를 가진 그룹만 반환
+    result = [group for group in groups.values() if len(group) > 1]
+    print(f"동의어 그룹 생성 완료: {len(result)}개 그룹")
+    return result
+
+
+def export_search_engine_files(dictionary, synonym_map, synonym_groups, bucket, prefix):
+    """
+    검색 엔진용 파일 생성 및 S3 업로드
+
+    Args:
+        dictionary: 신조어 사전
+        synonym_map: 동의어 매핑
+        synonym_groups: 동의어 그룹
+        bucket: S3 버킷
+        prefix: S3 키 프리픽스
+    """
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    search_engine_prefix = f"{prefix}search_engine/{timestamp}/"
+
+    print(f"\n검색 엔진 파일 생성 중... (s3://{bucket}/{search_engine_prefix})")
+
+    # 1. Solr 동의어 파일 (synonyms.txt)
+    synonyms_content = []
+    for group in synonym_groups:
+        if len(group) > 1:
+            line = ', '.join(sorted(group))
+            synonyms_content.append(line)
+
+    if synonyms_content:
+        synonyms_txt = '\n'.join(synonyms_content)
+        s3.put_object(
+            Bucket=bucket,
+            Key=f"{search_engine_prefix}synonyms.txt",
+            Body=synonyms_txt.encode('utf-8'),
+            ContentType='text/plain'
+        )
+        print(f"  ✓ synonyms.txt ({len(synonyms_content)} 그룹)")
+
+    # 2. WordNet 동의어 파일 (synonyms_wordnet.txt)
+    wordnet_content = []
+    for word, synonyms in sorted(synonym_map.items()):
+        if synonyms:
+            line = f"{word} => {', '.join(synonyms)}"
+            wordnet_content.append(line)
+
+    if wordnet_content:
+        wordnet_txt = '\n'.join(wordnet_content)
+        s3.put_object(
+            Bucket=bucket,
+            Key=f"{search_engine_prefix}synonyms_wordnet.txt",
+            Body=wordnet_txt.encode('utf-8'),
+            ContentType='text/plain'
+        )
+        print(f"  ✓ synonyms_wordnet.txt ({len(wordnet_content)} 매핑)")
+
+    # 3. 사용자 사전 (user_dictionary.txt)
+    user_dict_content = '\n'.join([w['word'] for w in dictionary['words']])
+    s3.put_object(
+        Bucket=bucket,
+        Key=f"{search_engine_prefix}user_dictionary.txt",
+        Body=user_dict_content.encode('utf-8'),
+        ContentType='text/plain'
+    )
+    print(f"  ✓ user_dictionary.txt ({dictionary['total_words']} 단어)")
+
+    # 4. Nori 사용자 사전 (nori_user_dictionary.txt)
+    pos_tag_map = {
+        'abbreviation': 'NNP',
+        'compound': 'NNG',
+        'slang': 'NNG',
+        'unknown': 'NNG'
+    }
+
+    nori_lines = []
+    for word_entry in dictionary['words']:
+        word = word_entry['word']
+        word_type = word_entry.get('type', 'unknown')
+        pos_tag = pos_tag_map.get(word_type, 'NNG')
+        nori_lines.append(f"{word} {pos_tag}")
+
+    nori_content = '\n'.join(nori_lines)
+    s3.put_object(
+        Bucket=bucket,
+        Key=f"{search_engine_prefix}nori_user_dictionary.txt",
+        Body=nori_content.encode('utf-8'),
+        ContentType='text/plain'
+    )
+    print(f"  ✓ nori_user_dictionary.txt")
+
+    # 5. 인덱스 설정 (index_settings.json)
+    index_settings = {
+        "settings": {
+            "analysis": {
+                "tokenizer": {
+                    "nori_user_dict": {
+                        "type": "nori_tokenizer",
+                        "decompound_mode": "mixed",
+                        "user_dictionary": "nori_user_dictionary.txt"
+                    }
+                },
+                "filter": {
+                    "synonym_filter": {
+                        "type": "synonym",
+                        "synonyms_path": "synonyms.txt",
+                        "updateable": True
+                    },
+                    "nori_posfilter": {
+                        "type": "nori_part_of_speech",
+                        "stoptags": [
+                            "E", "IC", "J", "MAG", "MAJ",
+                            "MM", "SP", "SSC", "SSO", "SC",
+                            "SE", "XPN", "XSA", "XSN", "XSV",
+                            "UNA", "NA", "VSV"
+                        ]
+                    }
+                },
+                "analyzer": {
+                    "korean_analyzer": {
+                        "type": "custom",
+                        "tokenizer": "nori_user_dict",
+                        "filter": [
+                            "lowercase",
+                            "nori_posfilter",
+                            "synonym_filter",
+                            "nori_readingform"
+                        ]
+                    }
+                }
+            },
+            "index": {
+                "number_of_shards": 1,
+                "number_of_replicas": 1
+            }
+        },
+        "mappings": {
+            "properties": {
+                "text": {
+                    "type": "text",
+                    "analyzer": "korean_analyzer"
+                },
+                "title": {
+                    "type": "text",
+                    "analyzer": "korean_analyzer",
+                    "fields": {
+                        "keyword": {
+                            "type": "keyword"
+                        }
+                    }
+                },
+                "timestamp": {
+                    "type": "date"
+                }
+            }
+        }
+    }
+
+    save_to_s3(index_settings, bucket, f"{search_engine_prefix}index_settings.json")
+    print(f"  ✓ index_settings.json")
+
+    # 6. README 파일
+    readme_content = f"""# 검색 엔진 설정 파일
+
+생성 일시: {datetime.now().isoformat()}
+총 단어 수: {dictionary['total_words']}
+동의어 그룹: {len(synonym_groups)}
+
+## 파일 목록
+
+1. **synonyms.txt** - Solr 형식 동의어 파일
+   - OpenSearch/Elasticsearch synonym filter용
+   - 형식: word1, word2, word3
+
+2. **synonyms_wordnet.txt** - WordNet 형식 동의어 파일
+   - 형식: word1 => word2, word3
+
+3. **user_dictionary.txt** - 기본 사용자 사전
+   - 한 줄에 하나씩 단어 나열
+
+4. **nori_user_dictionary.txt** - Nori Tokenizer용 사용자 사전
+   - 품사 태그 포함
+   - 형식: word POS_TAG
+
+5. **index_settings.json** - OpenSearch/Elasticsearch 인덱스 설정
+   - analyzer, tokenizer, filter 설정 포함
+
+## 사용 방법
+
+### 1. 파일 다운로드
+```bash
+aws s3 cp s3://{bucket}/{search_engine_prefix} . --recursive
+```
+
+### 2. OpenSearch/Elasticsearch config 디렉토리에 복사
+```bash
+cp synonyms.txt $OPENSEARCH_HOME/config/analysis/
+cp nori_user_dictionary.txt $OPENSEARCH_HOME/config/
+```
+
+### 3. 인덱스 생성
+```bash
+curl -X PUT "localhost:9200/neologism_search" \\
+  -H 'Content-Type: application/json' \\
+  -d @index_settings.json
+```
+
+### 4. OpenSearch/Elasticsearch 재시작
+```bash
+sudo systemctl restart opensearch
+```
+
+## 주의사항
+
+- 동의어/사용자 사전 파일을 변경한 후에는 인덱스를 재생성하거나 reload API를 사용해야 합니다.
+- synonym filter의 `updateable: true` 설정으로 runtime 업데이트 가능
+
+## 참고
+
+- Nori Tokenizer: https://www.elastic.co/guide/en/elasticsearch/plugins/current/analysis-nori.html
+- Synonym Token Filter: https://opensearch.org/docs/latest/analyzers/token-filters/synonym/
+"""
+
+    s3.put_object(
+        Bucket=bucket,
+        Key=f"{search_engine_prefix}README.md",
+        Body=readme_content.encode('utf-8'),
+        ContentType='text/markdown'
+    )
+    print(f"  ✓ README.md")
+
+    # 최신 버전도 복사 (latest 디렉토리)
+    latest_prefix = f"{prefix}search_engine/latest/"
+    print(f"\n최신 버전 복사 중... (s3://{bucket}/{latest_prefix})")
+
+    for filename in ['synonyms.txt', 'synonyms_wordnet.txt', 'user_dictionary.txt',
+                     'nori_user_dictionary.txt', 'index_settings.json', 'README.md']:
+        source_key = f"{search_engine_prefix}{filename}"
+        dest_key = f"{latest_prefix}{filename}"
+
+        s3.copy_object(
+            Bucket=bucket,
+            CopySource={'Bucket': bucket, 'Key': source_key},
+            Key=dest_key
+        )
+
+    print(f"검색 엔진 파일 생성 완료!")
+    print(f"  - 타임스탬프 버전: s3://{bucket}/{search_engine_prefix}")
+    print(f"  - 최신 버전: s3://{bucket}/{latest_prefix}")
+
+
 def main():
     """메인 처리 로직"""
 
@@ -489,8 +826,45 @@ def main():
         save_to_s3(dictionary, OUTPUT_BUCKET, latest_semantic_key)
         print("✓ 의미 사전 저장 완료")
 
-    # 8. 통계 출력
-    print("\n=== 8. 작업 완료 ===")
+    # 8. 동의어 생성 및 검색 엔진 파일 export (선택사항)
+    if GENERATE_SYNONYMS or EXPORT_FOR_SEARCH_ENGINE:
+        print("\n=== 8. 동의어 생성 및 검색 엔진 파일 export ===")
+
+        # 단어 리스트 추출
+        words = [w['word'] for w in dictionary['words']]
+
+        # 동의어 생성
+        synonym_map = {}
+        synonym_groups = []
+
+        if GENERATE_SYNONYMS:
+            print("동의어 생성 중...")
+            synonym_map = generate_synonyms_simple(words, texts)
+            synonym_groups = generate_synonym_groups(synonym_map)
+
+            # 동의어 정보를 사전에 추가
+            for word_entry in dictionary['words']:
+                word = word_entry['word']
+                if word in synonym_map and synonym_map[word]:
+                    word_entry['synonyms'] = synonym_map[word]
+
+            # 업데이트된 사전 다시 저장
+            save_to_s3(dictionary, OUTPUT_BUCKET, latest_json_key)
+            print(f"✓ 동의어 생성 완료: {len(synonym_map)}개 단어, {len(synonym_groups)}개 그룹")
+
+        # 검색 엔진 파일 export
+        if EXPORT_FOR_SEARCH_ENGINE:
+            print("검색 엔진 파일 생성 중...")
+            export_search_engine_files(
+                dictionary,
+                synonym_map,
+                synonym_groups,
+                OUTPUT_BUCKET,
+                OUTPUT_PREFIX
+            )
+
+    # 9. 통계 출력
+    print("\n=== 9. 작업 완료 ===")
     print(f"총 단어 수: {dictionary['total_words']}")
     if ENABLE_DEDUP:
         meta = dictionary.get('metadata', {})
