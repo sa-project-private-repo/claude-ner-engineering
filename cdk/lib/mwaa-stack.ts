@@ -69,7 +69,7 @@ export class MwaaStack extends cdk.Stack {
     });
 
     // DAG 파일 업로드
-    new s3deploy.BucketDeployment(this, 'DeployDags', {
+    const dagDeployment = new s3deploy.BucketDeployment(this, 'DeployDags', {
       sources: [s3deploy.Source.asset('../airflow/dags')],
       destinationBucket: this.mwaaBucket,
       destinationKeyPrefix: 'dags/',
@@ -88,6 +88,32 @@ export class MwaaStack extends cdk.Stack {
 
     // S3 접근 권한
     this.mwaaBucket.grantReadWrite(mwaaRole);
+
+    // MWAA가 S3 경로를 검증할 수 있도록 명시적 권한 추가
+    mwaaRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: [
+          's3:ListBucket',
+          's3:GetBucketLocation',
+          's3:GetBucketVersioning',
+          's3:ListBucketVersions',
+        ],
+        resources: [this.mwaaBucket.bucketArn],
+      })
+    );
+
+    mwaaRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: [
+          's3:GetObject',
+          's3:GetObjectVersion',
+          's3:PutObject',
+          's3:DeleteObject',
+          's3:DeleteObjectVersion',
+        ],
+        resources: [`${this.mwaaBucket.bucketArn}/*`],
+      })
+    );
 
     // 데이터 버킷 접근 권한
     const dataBucket = s3.Bucket.fromBucketName(this, 'DataBucket', dataBucketName);
@@ -157,6 +183,9 @@ export class MwaaStack extends cdk.Stack {
       minWorkers: 1,
       webserverAccessMode: 'PUBLIC_ONLY', // 또는 PRIVATE_ONLY
     });
+
+    // MWAA 환경이 DAG 배포 이후에 생성되도록 종속성 설정
+    this.mwaaEnvironment.node.addDependency(dagDeployment);
 
     // Airflow 변수 설정 (DAG에서 사용)
     // Note: 실제로는 Airflow UI나 CLI로 설정해야 함
