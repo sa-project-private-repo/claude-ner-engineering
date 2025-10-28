@@ -60,7 +60,7 @@ echo -e "${GREEN}✓ CDK 의존성 설치 완료${NC}"
 echo -e "\n${YELLOW}[3/5] CDK 부트스트랩 확인 중...${NC}"
 
 AWS_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
-AWS_REGION=${AWS_REGION:-ap-northeast-2}
+AWS_REGION=${AWS_REGION:-us-east-1}
 
 echo "  계정: $AWS_ACCOUNT"
 echo "  리전: $AWS_REGION"

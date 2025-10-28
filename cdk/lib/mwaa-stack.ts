@@ -13,7 +13,7 @@ export interface MwaaStackProps extends cdk.StackProps {
 
 /**
  * AWS MWAA (Managed Workflows for Apache Airflow) Stack
- * Airflow 환경 및 관련 리소스 생성
+ * Creates Airflow environment and related resources
  */
 export class MwaaStack extends cdk.Stack {
   public readonly vpc: ec2.Vpc;
@@ -25,10 +25,12 @@ export class MwaaStack extends cdk.Stack {
 
     const { dataBucketName, glueJobName } = props;
 
-    // VPC 생성 (MWAA는 VPC 필수)
+    // Create VPC (VPC is required for MWAA)
+    // For MWAA high availability: 2 AZs, NAT Gateway required for each AZ
+    // IMPORTANT: MWAA does not support use1-az3 (us-east-1e) in us-east-1
     this.vpc = new ec2.Vpc(this, 'MwaaVpc', {
-      maxAzs: 2,
-      natGateways: 1, // 비용 절감을 위해 1개만
+      availabilityZones: ['us-east-1a', 'us-east-1b'], // Explicitly avoid us-east-1e (use1-az3)
+      natGateways: 1, // Using 1 NAT Gateway for cost optimization
       subnetConfiguration: [
         {
           name: 'Public',
@@ -43,6 +45,13 @@ export class MwaaStack extends cdk.Stack {
       ],
     });
 
+    // VPC Endpoints for MWAA (Cost optimization: S3 only, rest via NAT Gateway)
+    // Add Gateway Endpoint for MWAA to access S3 from Private Subnet
+    this.vpc.addGatewayEndpoint('S3Endpoint', {
+      service: ec2.GatewayVpcEndpointAwsService.S3,
+      subnets: [{ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }],
+    });
+
     // Security Group
     const securityGroup = new ec2.SecurityGroup(this, 'MwaaSecurityGroup', {
       vpc: this.vpc,
@@ -50,32 +59,41 @@ export class MwaaStack extends cdk.Stack {
       allowAllOutbound: true,
     });
 
-    // Self-referencing rule (MWAA 요구사항)
+    // Self-referencing rule (MWAA requirement)
     securityGroup.addIngressRule(
       securityGroup,
       ec2.Port.allTraffic(),
       'Allow all traffic within security group'
     );
 
-    // S3 버킷: Airflow DAGs, Plugins, Requirements
+    // S3 Bucket: Airflow DAGs, Plugins, Requirements
     this.mwaaBucket = new s3.Bucket(this, 'MwaaBucket', {
-      // bucketName을 지정하지 않으면 CDK가 고유한 이름을 자동 생성
-      // 명시적 이름이 필요한 경우: bucketName: `neologism-mwaa-${this.account}-${this.region}`,
-      versioned: true, // MWAA 요구사항
+      // CDK auto-generates unique name if bucketName not specified
+      // If explicit name needed: bucketName: `neologism-mwaa-${this.account}-${this.region}`,
+      versioned: true, // MWAA requirement
       encryption: s3.BucketEncryption.S3_MANAGED,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: true, // 스택 삭제/업데이트 시 자동으로 모든 객체 삭제
+      autoDeleteObjects: true, // Auto-delete all objects on stack delete/update
     });
 
-    // DAG 파일 업로드
+    // Upload DAG files
     const dagDeployment = new s3deploy.BucketDeployment(this, 'DeployDags', {
       sources: [s3deploy.Source.asset('../airflow/dags')],
       destinationBucket: this.mwaaBucket,
       destinationKeyPrefix: 'dags/',
     });
 
-    // IAM Role: MWAA 실행 역할
+    // Upload requirements.txt
+    const requirementsDeployment = new s3deploy.BucketDeployment(this, 'DeployRequirements', {
+      sources: [s3deploy.Source.asset('../airflow', {
+        exclude: ['dags/**'],
+      })],
+      destinationBucket: this.mwaaBucket,
+      destinationKeyPrefix: '',
+    });
+
+    // IAM Role: MWAA execution role
     const mwaaRole = new iam.Role(this, 'MwaaExecutionRole', {
       assumedBy: new iam.CompositePrincipal(
         new iam.ServicePrincipal('airflow.amazonaws.com'),
@@ -86,10 +104,10 @@ export class MwaaStack extends cdk.Stack {
       ],
     });
 
-    // S3 접근 권한
+    // S3 access permissions
     this.mwaaBucket.grantReadWrite(mwaaRole);
 
-    // MWAA가 S3 경로를 검증할 수 있도록 명시적 권한 추가
+    // Add explicit permissions for MWAA to validate S3 paths
     mwaaRole.addToPolicy(
       new iam.PolicyStatement({
         actions: [
@@ -115,18 +133,19 @@ export class MwaaStack extends cdk.Stack {
       })
     );
 
-    // 데이터 버킷 접근 권한
+    // Data bucket access permissions
     const dataBucket = s3.Bucket.fromBucketName(this, 'DataBucket', dataBucketName);
     dataBucket.grantReadWrite(mwaaRole);
 
-    // Glue 접근 권한
+    // Glue access permissions (Required for GlueJobOperator)
     mwaaRole.addToPolicy(
       new iam.PolicyStatement({
         actions: [
-          'glue:StartJobRun',
-          'glue:GetJobRun',
-          'glue:GetJobRuns',
-          'glue:BatchStopJobRun',
+          'glue:GetJob',           // Required to check if job exists
+          'glue:StartJobRun',      // Required to start job
+          'glue:GetJobRun',        // Required to get job run status
+          'glue:GetJobRuns',       // Required to list job runs
+          'glue:BatchStopJobRun',  // Required to stop job runs
         ],
         resources: [
           `arn:aws:glue:${this.region}:${this.account}:job/${glueJobName}`,
@@ -134,22 +153,125 @@ export class MwaaStack extends cdk.Stack {
       })
     );
 
-    // Airflow 환경 변수
+    // EC2/VPC permissions (Required for MWAA to create/manage ENI)
+    mwaaRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'ec2:CreateNetworkInterface',
+          'ec2:DescribeNetworkInterfaces',
+          'ec2:CreateNetworkInterfacePermission',
+          'ec2:DeleteNetworkInterface',
+          'ec2:DeleteNetworkInterfacePermission',
+          'ec2:DescribeSubnets',
+          'ec2:DescribeVpcs',
+          'ec2:DescribeSecurityGroups',
+          'ec2:DescribeRouteTables',
+        ],
+        resources: ['*'], // EC2 describe actions cannot be resource-restricted
+      })
+    );
+
+    // CloudWatch Logs permissions (Create log groups/streams)
+    mwaaRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'logs:CreateLogGroup',
+          'logs:CreateLogStream',
+          'logs:PutLogEvents',
+          'logs:GetLogEvents',
+          'logs:GetLogRecord',
+          'logs:GetLogGroupFields',
+          'logs:GetQueryResults',
+          'logs:DescribeLogGroups',
+        ],
+        resources: [
+          `arn:aws:logs:${this.region}:${this.account}:log-group:airflow-*`,
+        ],
+      })
+    );
+
+    // REQUIRED: airflow:PublishMetrics permission for MWAA environment monitoring
+    mwaaRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['airflow:PublishMetrics'],
+        resources: [
+          `arn:aws:airflow:${this.region}:${this.account}:environment/neologism-extraction-env`,
+        ],
+      })
+    );
+
+    // REQUIRED: SQS permissions for Airflow Celery task queue
+    mwaaRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'sqs:ChangeMessageVisibility',
+          'sqs:DeleteMessage',
+          'sqs:GetQueueAttributes',
+          'sqs:GetQueueUrl',
+          'sqs:ReceiveMessage',
+          'sqs:SendMessage',
+        ],
+        resources: [
+          `arn:aws:sqs:${this.region}:*:airflow-celery-*`,
+        ],
+      })
+    );
+
+    // REQUIRED: KMS permissions for AWS owned key (via SQS)
+    // Using NotResource to allow access to AWS-owned keys outside the account
+    mwaaRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: [
+          'kms:Decrypt',
+          'kms:DescribeKey',
+          'kms:GenerateDataKey*',
+          'kms:Encrypt',
+        ],
+        notResources: [
+          `arn:aws:kms:*:${this.account}:key/*`,
+        ],
+        conditions: {
+          StringLike: {
+            'kms:ViaService': [
+              `sqs.${this.region}.amazonaws.com`,
+            ],
+          },
+        },
+      })
+    );
+
+    // REQUIRED: CloudWatch metrics permission
+    mwaaRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+      })
+    );
+
+    // REQUIRED: S3 public access block check
+    mwaaRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ['s3:GetAccountPublicAccessBlock'],
+        resources: ['*'],
+      })
+    );
+
+    // Airflow environment variables
     const airflowConfigurationOptions: { [key: string]: string } = {
       'core.default_timezone': 'Asia/Seoul',
       'webserver.default_ui_timezone': 'Asia/Seoul',
       'logging.logging_level': 'INFO',
     };
 
-    // MWAA 환경 생성
+    // Create MWAA environment
     this.mwaaEnvironment = new mwaa.CfnEnvironment(this, 'MwaaEnvironment', {
       name: 'neologism-extraction-env',
-      // Airflow 2.9.2 사용 (안정적이고 모든 리전에서 지원)
-      // Airflow 3.x를 사용하려면: '3.0.6' (일부 리전에서만 지원)
+      // Use Airflow 2.9.2 (stable and supported in all regions)
+      // To use Airflow 3.x: '3.0.6' (only supported in some regions)
       airflowVersion: '2.9.2',
       sourceBucketArn: this.mwaaBucket.bucketArn,
       dagS3Path: 'dags/',
-      // requirementsS3Path: 'requirements.txt', // 필요시 활성화
+      requirementsS3Path: 'requirements.txt', // Additional packages for web crawling (requests, beautifulsoup4)
       executionRoleArn: mwaaRole.roleArn,
       networkConfiguration: {
         subnetIds: this.vpc.privateSubnets.slice(0, 2).map(subnet => subnet.subnetId),
@@ -178,17 +300,20 @@ export class MwaaStack extends cdk.Stack {
         },
       },
       airflowConfigurationOptions,
-      environmentClass: 'mw1.small', // 최소 사양 (개발용)
+      environmentClass: 'mw1.medium', // Medium spec - increased for faster provisioning
       maxWorkers: 2,
       minWorkers: 1,
-      webserverAccessMode: 'PUBLIC_ONLY', // 또는 PRIVATE_ONLY
+      // Set to PUBLIC_ONLY - dev/test environment
+      // For production, PRIVATE_ONLY recommended (requires VPN or SSM)
+      webserverAccessMode: 'PUBLIC_ONLY',
     });
 
-    // MWAA 환경이 DAG 배포 이후에 생성되도록 종속성 설정
+    // Set dependency so MWAA environment is created after DAG deployment
     this.mwaaEnvironment.node.addDependency(dagDeployment);
+    this.mwaaEnvironment.node.addDependency(requirementsDeployment); // requirements not used but file kept in S3
 
-    // Airflow 변수 설정 (DAG에서 사용)
-    // Note: 실제로는 Airflow UI나 CLI로 설정해야 함
+    // Airflow variable configuration (used in DAGs)
+    // Note: Actually needs to be set via Airflow UI or CLI
     const airflowVariables = {
       neologism_s3_bucket: dataBucketName,
       neologism_input_prefix: 'input/raw-texts/',
@@ -200,24 +325,24 @@ export class MwaaStack extends cdk.Stack {
     // Outputs
     new cdk.CfnOutput(this, 'MwaaEnvironmentName', {
       value: this.mwaaEnvironment.name,
-      description: 'MWAA 환경 이름',
+      description: 'MWAA environment name',
       exportName: 'NeologismMwaaEnvironment',
     });
 
     new cdk.CfnOutput(this, 'MwaaBucketName', {
       value: this.mwaaBucket.bucketName,
-      description: 'MWAA DAG 버킷',
+      description: 'MWAA DAG bucket',
       exportName: 'NeologismMwaaBucket',
     });
 
     new cdk.CfnOutput(this, 'AirflowVariables', {
       value: JSON.stringify(airflowVariables, null, 2),
-      description: 'Airflow에 설정해야 할 변수들',
+      description: 'Variables to be set in Airflow',
     });
 
     new cdk.CfnOutput(this, 'MwaaWebserverUrl', {
       value: `https://${this.mwaaEnvironment.attrWebserverUrl}`,
-      description: 'Airflow 웹서버 URL',
+      description: 'Airflow webserver URL',
     });
   }
 }

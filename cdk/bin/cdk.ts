@@ -19,7 +19,7 @@ const app = new cdk.App();
 // 환경 설정 (계정/리전)
 const env: cdk.Environment = {
   account: process.env.CDK_DEFAULT_ACCOUNT,
-  region: process.env.CDK_DEFAULT_REGION || 'ap-northeast-2',
+  region: process.env.CDK_DEFAULT_REGION || 'us-east-1',
 };
 
 // Stack 1: Glue 인프라
