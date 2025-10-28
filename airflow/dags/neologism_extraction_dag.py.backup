@@ -1,10 +1,10 @@
 """
 Airflow DAG: 신조어 추출 파이프라인
 
-매일 실행되어 SNS 크롤링을 통해 신조어를 추출하고 코퍼스를 업데이트합니다.
+매일 실행되어 공공 데이터에서 신조어를 추출하고 코퍼스를 업데이트합니다.
 
 워크플로우:
-1. 데이터 수집 (디시인사이드, 네이버 블로그 크롤링)
+1. 데이터 수집 (SNS, AIHub)
 2. AWS Glue Job 실행 (신조어 추출)
 3. 결과 검증
 4. 알림 전송
@@ -42,156 +42,81 @@ GLUE_JOB_NAME = Variable.get("neologism_glue_job", default_var="neologism-extrac
 AWS_REGION = Variable.get("aws_region", default_var="us-east-1")
 
 
-def collect_dcinside_data(**context):
+def collect_twitter_data(**context):
     """
-    디시인사이드 갤러리에서 크롤링하여 S3에 저장
+    Twitter에서 데이터 수집하여 S3에 저장
     """
-    import requests
-    from bs4 import BeautifulSoup
-    import time
-    import random
+    import os
+
+    # Twitter API 설정 (Airflow Variables 또는 Secrets Manager에서 가져오기)
+    bearer_token = Variable.get("twitter_bearer_token", default_var=None)
 
     s3_client = boto3.client('s3', region_name=AWS_REGION)
     execution_date = context['execution_date'].strftime('%Y%m%d')
 
-    # 크롤링 대상 갤러리 (인기 갤러리들)
-    galleries = ['baseball_new10', 'programming', 'game', 'dcbest']
-
-    collected_texts = []
-
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    }
-
-    for gallery in galleries:
-        try:
-            url = f"https://gall.dcinside.com/board/lists/?id={gallery}"
-            response = requests.get(url, headers=headers, timeout=10)
-
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-
-                # 게시글 제목 추출
-                titles = soup.select('.ub-word a')
-                for title in titles[:20]:  # 상위 20개만
-                    text = title.get_text(strip=True)
-                    if text and len(text) > 5:  # 최소 길이 체크
-                        collected_texts.append(text)
-
-            # Rate limiting (1-2초 대기)
-            time.sleep(random.uniform(1, 2))
-
-        except Exception as e:
-            print(f"갤러리 {gallery} 크롤링 실패: {e}")
-            continue
-
-    # 최소 데이터 확보 체크
-    if len(collected_texts) < 10:
-        print(f"경고: 수집된 텍스트가 {len(collected_texts)}개로 적습니다. 샘플 데이터 추가.")
-        collected_texts.extend([
-            "오늘 완전 꿀잼이었어 ㅋㅋㅋ",
-            "점메추 좀 해주세요",
-            "갓생 살고 싶다",
-        ])
+    # 샘플 데이터 (실제로는 Twitter API 호출)
+    sample_tweets = [
+        "오늘 완전 꿀잼이었어 ㅋㅋㅋ",
+        "점메추 좀 해주세요",
+        "갓생 살고 싶다",
+        "이거 레알 대박",
+        "오늘 TMI 하나 풀자면",
+        "완전 핵인싸네 ㄷㄷ",
+        "JMT 맛집 발견!",
+    ]
 
     # JSON 형식으로 저장
     data = {
-        'source': 'dcinside',
+        'source': 'twitter',
         'collected_at': datetime.now().isoformat(),
-        'galleries': galleries,
-        'texts': collected_texts,
-        'count': len(collected_texts)
+        'texts': sample_tweets
     }
 
     # S3에 저장
-    s3_key = f"{S3_INPUT_PREFIX}dcinside/{execution_date}/posts.json"
+    s3_key = f"{S3_INPUT_PREFIX}twitter/{execution_date}/tweets.json"
     s3_client.put_object(
         Bucket=S3_BUCKET,
         Key=s3_key,
-        Body=json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8'),
+        Body=json.dumps(data, ensure_ascii=False).encode('utf-8'),
         ContentType='application/json'
     )
 
-    print(f"디시인사이드 데이터 수집 완료: {len(collected_texts)}건")
-    print(f"저장 위치: s3://{S3_BUCKET}/{s3_key}")
+    print(f"Twitter 데이터 저장 완료: s3://{S3_BUCKET}/{s3_key}")
     return s3_key
 
 
-def collect_naver_blog_data(**context):
+def collect_aihub_data(**context):
     """
-    네이버 블로그에서 크롤링하여 S3에 저장
+    AIHub에서 데이터 수집하여 S3에 저장
     """
-    import requests
-    from bs4 import BeautifulSoup
-    import time
-    import random
+    aihub_api_key = Variable.get("aihub_api_key", default_var=None)
 
     s3_client = boto3.client('s3', region_name=AWS_REGION)
     execution_date = context['execution_date'].strftime('%Y%m%d')
 
-    # 인기 검색어 (젊은층이 많이 사용하는 키워드)
-    keywords = ['일상', '브이로그', '맛집', '여행', '패션']
+    # 샘플 데이터 (실제로는 AIHub API 호출)
+    sample_texts = [
+        "최근 젊은 층에서 많이 사용하는 신조어들",
+        "갓생 루틴을 시작했습니다",
+        "점메추가 정말 어렵네요",
+    ]
 
-    collected_texts = []
-
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    }
-
-    for keyword in keywords:
-        try:
-            # 네이버 블로그 검색 (최신순)
-            url = f"https://section.blog.naver.com/Search/Post.naver?keyword={keyword}&orderBy=sim"
-            response = requests.get(url, headers=headers, timeout=10)
-
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-
-                # 블로그 제목 및 본문 일부 추출
-                titles = soup.select('.title_link')
-                for title in titles[:10]:  # 키워드당 10개
-                    text = title.get_text(strip=True)
-                    if text and len(text) > 5:
-                        collected_texts.append(text)
-
-            # Rate limiting
-            time.sleep(random.uniform(1, 2))
-
-        except Exception as e:
-            print(f"키워드 '{keyword}' 크롤링 실패: {e}")
-            continue
-
-    # 최소 데이터 확보 체크
-    if len(collected_texts) < 10:
-        print(f"경고: 수집된 텍스트가 {len(collected_texts)}개로 적습니다. 샘플 데이터 추가.")
-        collected_texts.extend([
-            "최근 젊은 층에서 많이 사용하는 신조어들",
-            "갓생 루틴을 시작했습니다",
-            "점메추가 정말 어렵네요",
-            "오늘 완전 핵꿀잼 영화 봤어요",
-            "이거 레알 가성비 갑이네요",
-        ])
-
-    # JSON 형식으로 저장
     data = {
-        'source': 'naver_blog',
+        'source': 'aihub',
         'collected_at': datetime.now().isoformat(),
-        'keywords': keywords,
-        'texts': collected_texts,
-        'count': len(collected_texts)
+        'texts': sample_texts
     }
 
     # S3에 저장
-    s3_key = f"{S3_INPUT_PREFIX}naver_blog/{execution_date}/posts.json"
+    s3_key = f"{S3_INPUT_PREFIX}aihub/{execution_date}/texts.json"
     s3_client.put_object(
         Bucket=S3_BUCKET,
         Key=s3_key,
-        Body=json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8'),
+        Body=json.dumps(data, ensure_ascii=False).encode('utf-8'),
         ContentType='application/json'
     )
 
-    print(f"네이버 블로그 데이터 수집 완료: {len(collected_texts)}건")
-    print(f"저장 위치: s3://{S3_BUCKET}/{s3_key}")
+    print(f"AIHub 데이터 저장 완료: s3://{S3_BUCKET}/{s3_key}")
     return s3_key
 
 
@@ -286,16 +211,16 @@ with DAG(
         task_id='start',
     )
 
-    # Task 1: 디시인사이드 데이터 수집
-    collect_dcinside = PythonOperator(
-        task_id='collect_dcinside_data',
-        python_callable=collect_dcinside_data,
+    # Task 1: Twitter 데이터 수집
+    collect_twitter = PythonOperator(
+        task_id='collect_twitter_data',
+        python_callable=collect_twitter_data,
     )
 
-    # Task 2: 네이버 블로그 데이터 수집
-    collect_naver_blog = PythonOperator(
-        task_id='collect_naver_blog_data',
-        python_callable=collect_naver_blog_data,
+    # Task 2: AIHub 데이터 수집
+    collect_aihub = PythonOperator(
+        task_id='collect_aihub_data',
+        python_callable=collect_aihub_data,
     )
 
     # Task 3: 데이터 수집 완료
@@ -352,5 +277,5 @@ with DAG(
     )
 
     # Task 의존성 정의
-    start >> [collect_dcinside, collect_naver_blog] >> data_collection_complete
+    start >> [collect_twitter, collect_aihub] >> data_collection_complete
     data_collection_complete >> run_glue_job >> wait_for_glue >> validate >> notify >> end

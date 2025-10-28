@@ -16,7 +16,7 @@
 - **유연한 스케줄링**: 일일/주간/월간 자동 실행 설정
 
 ### 핵심 기능
-- **자동 데이터 수집**: Twitter, AIHub 등 다양한 소스에서 텍스트 수집
+- **자동 데이터 수집**: 디시인사이드, 네이버 블로그 등 SNS 크롤링으로 텍스트 수집
 - **신조어 추출**: NLP 기술(soynlp, konlpy)을 활용한 신조어 탐지
 - **코퍼스 생성**: JSON, CSV, TXT 등 다양한 포맷으로 사전 생성
 - **자동화 파이프라인**: AWS Glue + MWAA로 일일 자동 실행
@@ -26,27 +26,33 @@
 
 ```
 ┌─────────────┐     ┌──────────────┐     ┌─────────────┐
-│   Twitter   │────▶│  AWS Lambda  │────▶│     S3      │
-│   AIHub     │     │  Data Collect│     │  Raw Data   │
+│ 디시인사이드 │────▶│ MWAA/Airflow │────▶│     S3      │
+│ 네이버블로그 │     │ Web Crawling │     │  Raw Data   │
 └─────────────┘     └──────────────┘     └─────────────┘
                                                  │
                                                  ▼
                                           ┌─────────────┐
                                           │  AWS Glue   │
-                                          │  ETL Job    │
+                                          │신조어 추출  │
                                           └─────────────┘
                                                  │
                                                  ▼
                                           ┌─────────────┐
                                           │     S3      │
                                           │   Corpus    │
+                                          │  (동의어)   │
                                           └─────────────┘
                                                  │
-┌─────────────┐                                 │
-│    MWAA     │─────────────────────────────────┘
-│  (Airflow)  │  스케줄링 및 모니터링
-└─────────────┘
+                                                 ▼
+                                          ┌─────────────┐
+                                          │ OpenSearch  │
+                                          │Elasticsearch│
+                                          └─────────────┘
 ```
+
+- **데이터 수집**: Airflow DAG에서 requests + BeautifulSoup4로 웹 크롤링
+- **신조어 추출**: AWS Glue Job에서 soynlp 기반 처리
+- **검색 엔진 통합**: Solr 동의어, Nori 사용자 사전 자동 생성
 
 ## 프로젝트 구조
 
@@ -91,7 +97,8 @@ claude-ner-engineering/
 │   ├── IMPROVEMENTS.md                  # 개선 제안서
 │   └── SEARCH_ENGINE_INTEGRATION.md     # 검색 엔진 통합 가이드 ⭐ NEW
 ├── scripts/
-│   └── setup_local_airflow.sh           # Airflow 로컬 환경 설정 ⭐ NEW
+│   ├── setup_local_airflow.sh           # Airflow 로컬 환경 설정 ⭐ NEW
+│   └── setup-airflow-variables.sh       # Airflow Variables 자동 설정 ⭐ NEW
 ├── requirements.txt                     # Python 의존성
 ├── pytest.ini                           # pytest 설정 ⭐ NEW
 └── README.md
@@ -155,23 +162,51 @@ cdk deploy NeologismMwaaStack
 - Glue Job 이름
 - MWAA 환경 URL
 
-### 4. Airflow 설정
+### 4. Airflow Variables 설정
 
-1. MWAA 웹 UI 접속 (CDK 출력 참조)
-2. Admin > Variables에서 다음 변수 설정:
+MWAA 환경에서 DAG가 정상적으로 동작하려면 Airflow Variables를 설정해야 합니다.
 
-```
-neologism_s3_bucket: <data-bucket-name>
-neologism_input_prefix: input/raw-texts/
-neologism_output_prefix: output/corpus/
-neologism_glue_job: neologism-extraction-job
-aws_region: ap-northeast-2
+#### 방법 1: 자동 설정 스크립트 사용 (권장)
+
+CloudFormation outputs에서 자동으로 값을 추출하여 JSON 파일을 생성합니다:
+
+```bash
+cd scripts
+./setup-airflow-variables.sh
 ```
 
-3. (선택) Twitter/AIHub API 키 설정:
-```
-twitter_bearer_token: <your-token>
-aihub_api_key: <your-key>
+스크립트 실행 결과:
+- `airflow-variables.json` 파일 생성
+- S3 버킷 이름이 자동으로 추출됨 (임의 문자열 포함)
+- Airflow 웹서버 URL 표시
+
+생성된 JSON 파일을 Airflow UI에서 Import:
+1. MWAA 웹 UI 접속 (스크립트 출력의 URL 참조)
+2. **Admin → Variables** 메뉴 이동
+3. **Import Variables** 버튼 클릭
+4. `airflow-variables.json` 파일 업로드
+
+#### 방법 2: 수동 설정
+
+MWAA 웹 UI에서 직접 Variables를 추가:
+
+1. **Admin → Variables** 메뉴 이동
+2. **+** 버튼으로 아래 변수들을 하나씩 추가:
+
+| Key | Value | 설명 |
+|-----|-------|------|
+| `neologism_s3_bucket` | `neologismgluestack-neologismdatabucket964d4a93-xxxxx` | 데이터 저장 버킷 (CloudFormation Output 참조) |
+| `neologism_input_prefix` | `input/raw-texts/` | 수집된 원본 데이터 경로 |
+| `neologism_output_prefix` | `output/corpus/` | 생성된 코퍼스 저장 경로 |
+| `neologism_glue_job` | `neologism-extraction-job` | Glue Job 이름 |
+| `aws_region` | `us-east-1` | AWS 리전 |
+
+**참고**: S3 버킷 이름은 CDK 배포 시 자동 생성되므로 CloudFormation outputs에서 확인해야 합니다:
+```bash
+aws cloudformation describe-stacks \
+  --stack-name NeologismGlueStack \
+  --query 'Stacks[0].Outputs[?OutputKey==`DataBucketName`].OutputValue' \
+  --output text
 ```
 
 ### 5. DAG 실행
