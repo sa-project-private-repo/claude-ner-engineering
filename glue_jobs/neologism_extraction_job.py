@@ -139,9 +139,16 @@ def read_texts_from_s3(bucket, prefix):
                             elif isinstance(item, str):
                                 texts.append(item)
                     elif isinstance(data, dict):
-                        text = data.get('text') or data.get('content') or data.get('sentence')
-                        if text:
-                            texts.append(text)
+                        # Check for 'texts' array (from Airflow DAG crawling)
+                        if 'texts' in data and isinstance(data['texts'], list):
+                            for text in data['texts']:
+                                if isinstance(text, str) and text.strip():
+                                    texts.append(text.strip())
+                        # Fallback to single text field
+                        else:
+                            text = data.get('text') or data.get('content') or data.get('sentence')
+                            if text:
+                                texts.append(text)
                 except Exception as e:
                     print(f"JSON 파싱 오류 ({key}): {e}")
             else:
@@ -174,7 +181,7 @@ def extract_neologisms_simple(texts, min_count=5, min_cohesion=0.05):
             if len(korean_only) >= 2:
                 word_freq[korean_only] += 1
 
-    # 최소 빈도 필터링
+    # 최소 빈도 필터링 (한글만)
     neologisms = {
         word: {
             'count': count,
@@ -183,7 +190,7 @@ def extract_neologisms_simple(texts, min_count=5, min_cohesion=0.05):
             'type': 'unknown'
         }
         for word, count in word_freq.items()
-        if count >= min_count
+        if count >= min_count and re.match(r'^[가-힣]+$', word)
     }
 
     return neologisms
@@ -211,27 +218,63 @@ def extract_neologisms_with_soynlp(texts, min_count=5, min_cohesion=0.05):
             preprocessed.append(text)
 
         # WordExtractor로 후보 추출
-        word_extractor = WordExtractor(
-            min_count=min_count,
-            min_cohesion_forward=min_cohesion,
-            min_right_branching_entropy=0.0
-        )
-
+        word_extractor = WordExtractor()
         word_extractor.train(preprocessed)
         words = word_extractor.extract()
 
         # 결과 정리
         neologisms = {}
+        debug_count = 0
         for word, stats in words.items():
+            # Debug: Print first 10 words' stats
+            if debug_count < 10:
+                print(f"DEBUG word='{word}', stats type={type(stats)}, stats={stats}")
+                if hasattr(stats, '_fields'):
+                    print(f"  _fields={stats._fields}")
+                debug_count += 1
+
+            # 길이 체크
             if len(word) < 2 or len(word) > 10:
                 continue
-            if word.isdigit():
+
+            # 한글만 포함된 단어만 허용 (특수문자, 숫자, 영문 제거)
+            if not re.match(r'^[가-힣]+$', word):
+                continue
+
+            # stats는 namedtuple (WordScore)로 count, cohesion_forward 등의 필드를 가짐
+            # count는 tuple.count() 메서드와 충돌하므로 인덱스 접근 또는 getattr 사용
+            try:
+                # namedtuple의 경우 _fields 속성이 있음
+                if hasattr(stats, '_fields'):
+                    # _fields를 사용해 안전하게 접근
+                    fields = dict(zip(stats._fields, stats))
+                    # soynlp Scores has leftside_frequency/rightside_frequency, not count
+                    # Use max of the two as the word count
+                    left_freq = fields.get('leftside_frequency', 0)
+                    right_freq = fields.get('rightside_frequency', 0)
+                    word_count = max(left_freq, right_freq)
+                    cohesion = fields.get('cohesion_forward', 0.0)
+                    if debug_count <= 10:
+                        print(f"  Extracted: count={word_count} (L={left_freq},R={right_freq}), cohesion={cohesion}")
+                else:
+                    # 일반 객체의 경우
+                    word_count = getattr(stats, 'count', 0)
+                    cohesion = getattr(stats, 'cohesion_forward', 0.0)
+            except Exception as e:
+                # 속성 접근 실패 시 건너뛰기
+                print(f"Warning: Could not access stats for word '{word}': {e}")
+                continue
+
+            # 빈도 및 cohesion 필터링
+            if word_count < min_count:
+                continue
+            if cohesion < min_cohesion:
                 continue
 
             neologisms[word] = {
-                'count': stats.count,
-                'score': stats.cohesion_forward,
-                'cohesion': stats.cohesion_forward,
+                'count': word_count,
+                'score': cohesion,
+                'cohesion': cohesion,
                 'type': 'neologism'
             }
 
@@ -479,7 +522,153 @@ def generate_synonym_groups(synonym_map):
     return result
 
 
-def export_search_engine_files(dictionary, synonym_map, synonym_groups, bucket, prefix):
+def train_cohesion_for_decomposition(texts):
+    """
+    텍스트 코퍼스에서 응집도(cohesion) 학습
+
+    Args:
+        texts: 텍스트 리스트
+
+    Returns:
+        cohesion_scores: {substring: cohesion_score}
+    """
+    from soynlp.word import WordExtractor
+
+    print("\n응집도 학습 중...")
+    word_extractor = WordExtractor(min_frequency=2, min_cohesion_forward=0.05)
+    word_extractor.train(texts)
+
+    # 응집도 점수 추출
+    cohesion_scores = {}
+    words_scores = word_extractor.extract()
+
+    for word, score in words_scores.items():
+        if hasattr(score, 'cohesion_forward'):
+            cohesion_scores[word] = score.cohesion_forward
+        elif hasattr(score, '_fields') and 'cohesion_forward' in score._fields:
+            fields = dict(zip(score._fields, score))
+            cohesion_scores[word] = fields.get('cohesion_forward', 0.0)
+
+    print(f"응집도 학습 완료: {len(cohesion_scores)}개 substring")
+    return cohesion_scores
+
+
+def decompose_compound_noun_ml(word, cohesion_scores, word_set, min_cohesion=0.3):
+    """
+    ML 기반 복합명사 분해 (응집도 기반)
+
+    Args:
+        word: 분해할 단어
+        cohesion_scores: substring별 응집도 점수
+        word_set: 알려진 단어 집합
+        min_cohesion: 최소 응집도 임계값
+
+    Returns:
+        분해된 형태소 리스트 또는 None
+        예: "사과나무" -> ["사과", "나무"]
+    """
+    if len(word) < 2:
+        return None
+
+    # 방법 1: 응집도 기반 분해
+    # 각 분할점에서 양쪽 substring의 응집도를 평가
+    best_split = None
+    best_score = -1
+
+    for split_point in range(1, len(word)):
+        left = word[:split_point]
+        right = word[split_point:]
+
+        # 각 부분이 최소 1음절 이상
+        if len(left) < 1 or len(right) < 1:
+            continue
+
+        # 양쪽의 응집도 점수 가져오기
+        left_cohesion = cohesion_scores.get(left, 0.0)
+        right_cohesion = cohesion_scores.get(right, 0.0)
+
+        # 평균 응집도 계산
+        avg_cohesion = (left_cohesion + right_cohesion) / 2.0
+
+        # 추가 가중치: 사전에 존재하는 단어면 가산점
+        if left in word_set:
+            left_cohesion += 0.2
+        if right in word_set:
+            right_cohesion += 0.2
+
+        # 양쪽 모두 최소 응집도를 만족하는 경우
+        if left_cohesion >= min_cohesion and right_cohesion >= min_cohesion:
+            combined_score = left_cohesion * right_cohesion  # 곱셈으로 균형 잡힌 분해 선호
+
+            if combined_score > best_score:
+                best_score = combined_score
+                best_split = (left, right)
+
+    if best_split:
+        left, right = best_split
+
+        # 재귀적 분해 시도 (오른쪽)
+        right_decomposed = decompose_compound_noun_ml(right, cohesion_scores, word_set, min_cohesion)
+        if right_decomposed:
+            return [left] + right_decomposed
+
+        return [left, right]
+
+    # 방법 2: 응집도가 낮은 경우, 알려진 접미사 패턴으로 폴백
+    common_suffixes = ['템', '러', '족', '감', '충', '년', '짱', '맨', '각', '력']
+    for suffix in common_suffixes:
+        if word.endswith(suffix) and len(word) > len(suffix) + 1:
+            prefix = word[:-len(suffix)]
+
+            # 접두사의 응집도 확인
+            prefix_cohesion = cohesion_scores.get(prefix, 0.0)
+
+            # 접두사가 의미 있는 경우 (2음절 이상이고 적절한 응집도)
+            if len(prefix) >= 2 and prefix_cohesion >= min_cohesion * 0.7:
+                return [prefix, suffix]
+
+    return None
+
+
+def decompose_all_compounds(dictionary, texts):
+    """
+    ML 기반 복합명사 분해 (응집도 기반)
+
+    Args:
+        dictionary: 신조어 사전
+        texts: 원본 텍스트 코퍼스 (응집도 학습용)
+
+    Returns:
+        {word: [decomposed_parts], ...}
+    """
+    # 1. 응집도 학습
+    cohesion_scores = train_cohesion_for_decomposition(texts)
+
+    # 2. 단어 집합 구축
+    word_set = set(w['word'] for w in dictionary['words'])
+
+    # 3. 각 단어에 대해 ML 기반 분해 수행
+    decompositions = {}
+
+    print("\nML 기반 복합명사 분해 중...")
+    for word_entry in dictionary['words']:
+        word = word_entry['word']
+        if len(word) >= 2:  # 최소 2음절 이상
+            decomposed = decompose_compound_noun_ml(word, cohesion_scores, word_set)
+            if decomposed:
+                decompositions[word] = decomposed
+                # 응집도 점수도 함께 출력
+                parts_with_scores = []
+                for part in decomposed:
+                    score = cohesion_scores.get(part, 0.0)
+                    parts_with_scores.append(f"{part}({score:.2f})")
+                print(f"  {word} → {' + '.join(parts_with_scores)}")
+
+    print(f"복합명사 분해 완료: {len(decompositions)}개 단어 (ML 기반)")
+    return decompositions
+
+
+def export_search_engine_files(dictionary, synonym_map, synonym_groups, bucket, prefix, texts=None):
     """
     검색 엔진용 파일 생성 및 S3 업로드
 
@@ -489,11 +678,19 @@ def export_search_engine_files(dictionary, synonym_map, synonym_groups, bucket, 
         synonym_groups: 동의어 그룹
         bucket: S3 버킷
         prefix: S3 키 프리픽스
+        texts: 원본 텍스트 코퍼스 (ML 기반 복합명사 분해용, 선택)
     """
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     search_engine_prefix = f"{prefix}search_engine/{timestamp}/"
 
     print(f"\n검색 엔진 파일 생성 중... (s3://{bucket}/{search_engine_prefix})")
+
+    # ML 기반 복합명사 분해
+    if texts:
+        decompositions = decompose_all_compounds(dictionary, texts)
+    else:
+        print("⚠️  텍스트 코퍼스가 제공되지 않아 복합명사 분해를 건너뜁니다.")
+        decompositions = {}
 
     # 1. Solr 동의어 파일 (synonyms.txt)
     synonyms_content = []
@@ -529,17 +726,30 @@ def export_search_engine_files(dictionary, synonym_map, synonym_groups, bucket, 
         )
         print(f"  ✓ synonyms_wordnet.txt ({len(wordnet_content)} 매핑)")
 
-    # 3. 사용자 사전 (user_dictionary.txt)
-    user_dict_content = '\n'.join([w['word'] for w in dictionary['words']])
+    # 3. 사용자 사전 (user_dictionary.txt) - 복합명사 분해 포함
+    user_dict_lines = []
+    decomposed_count = 0
+    for word_entry in dictionary['words']:
+        word = word_entry['word']
+        if word in decompositions:
+            # 복합명사: "사과나무 사과 나무" 형식
+            line = f"{word} {' '.join(decompositions[word])}"
+            decomposed_count += 1
+        else:
+            # 단일 명사: "사과" 형식
+            line = word
+        user_dict_lines.append(line)
+
+    user_dict_content = '\n'.join(user_dict_lines)
     s3.put_object(
         Bucket=bucket,
         Key=f"{search_engine_prefix}user_dictionary.txt",
         Body=user_dict_content.encode('utf-8'),
         ContentType='text/plain'
     )
-    print(f"  ✓ user_dictionary.txt ({dictionary['total_words']} 단어)")
+    print(f"  ✓ user_dictionary.txt ({dictionary['total_words']} 단어, {decomposed_count}개 분해)")
 
-    # 4. Nori 사용자 사전 (nori_user_dictionary.txt)
+    # 4. Nori 사용자 사전 (nori_user_dictionary.txt) - 복합명사 분해 포함
     pos_tag_map = {
         'abbreviation': 'NNP',
         'compound': 'NNG',
@@ -548,11 +758,20 @@ def export_search_engine_files(dictionary, synonym_map, synonym_groups, bucket, 
     }
 
     nori_lines = []
+    nori_decomposed_count = 0
     for word_entry in dictionary['words']:
         word = word_entry['word']
         word_type = word_entry.get('type', 'unknown')
         pos_tag = pos_tag_map.get(word_type, 'NNG')
-        nori_lines.append(f"{word} {pos_tag}")
+
+        if word in decompositions:
+            # 복합명사: "사과나무 사과 나무 NNG" 형식
+            decomposed_parts = ' '.join(decompositions[word])
+            nori_lines.append(f"{word} {decomposed_parts} {pos_tag}")
+            nori_decomposed_count += 1
+        else:
+            # 단일 명사: "사과 NNG" 형식
+            nori_lines.append(f"{word} {pos_tag}")
 
     nori_content = '\n'.join(nori_lines)
     s3.put_object(
@@ -561,7 +780,7 @@ def export_search_engine_files(dictionary, synonym_map, synonym_groups, bucket, 
         Body=nori_content.encode('utf-8'),
         ContentType='text/plain'
     )
-    print(f"  ✓ nori_user_dictionary.txt")
+    print(f"  ✓ nori_user_dictionary.txt ({nori_decomposed_count}개 복합명사 분해)")
 
     # 5. 인덱스 설정 (index_settings.json)
     index_settings = {
@@ -860,7 +1079,8 @@ def main():
                 synonym_map,
                 synonym_groups,
                 OUTPUT_BUCKET,
-                OUTPUT_PREFIX
+                OUTPUT_PREFIX,
+                texts  # ML 기반 복합명사 분해를 위한 원본 텍스트
             )
 
     # 9. 통계 출력
